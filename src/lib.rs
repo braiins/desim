@@ -75,6 +75,8 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::cmp::{Ordering, Reverse};
 use std::thread;
 use std::pin::Pin;
+use std::rc::Rc;
+use std::cell::RefCell;
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
@@ -105,6 +107,31 @@ struct Resource {
     queue: VecDeque<ProcessId>,
 }
 
+pub struct Context {
+    time: f64
+}
+
+impl Context {
+    /// Create a new `Context` environment.
+    pub fn new() -> Context {
+        Context::default()
+    }
+
+    /// Returns the current simulation time
+    pub fn time(&self) -> f64 {
+        self.time
+    }
+}
+
+
+impl Default for Context {
+    fn default() -> Self {
+        Context {
+            time: 0.0
+        }
+    }
+}
+
 /// This struct provides the methods to create and run the simulation
 /// in a single thread.
 ///
@@ -114,7 +141,7 @@ struct Resource {
 /// See the crate-level documentation for more information about how the
 /// simulation framework works
 pub struct Simulation {
-    time: f64,
+    context: Rc<RefCell<Context>>,
     processes: Vec<Option<Box<dyn Generator<Yield = Effect, Return = ()> + Unpin>>>,
     future_events: BinaryHeap<Reverse<Event>>,
     processed_events: Vec<Event>,
@@ -149,13 +176,14 @@ pub enum EndCondition {
 
 impl Simulation {
     /// Create a new `Simulation` environment.
-    pub fn new() -> Simulation {
-        Simulation::default()
-    }
-
-    /// Returns the current simulation time
-    pub fn time(&self) -> f64 {
-        self.time
+    pub fn new(ctx: Rc<RefCell<Context>>) -> Simulation {
+        Simulation {
+            context: ctx,
+            processes: Vec::default(),
+            future_events: BinaryHeap::default(),
+            processed_events: Vec::default(),
+            resources: Vec::default(),
+        }
     }
 
     /// Returns the log of processed events
@@ -202,15 +230,16 @@ impl Simulation {
     pub fn step(&mut self) {
         match self.future_events.pop() {
             Some(Reverse(event)) => {
-                self.time = event.time;
+                self.context.borrow_mut().time = event.time;
+                let ctx = self.context.borrow();
                 match Pin::new(self.processes[event.process].as_mut().expect("ERROR. Tried to resume a completed process.")).resume() {
                     GeneratorState::Yielded(y) => match y {
                         Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
-                            time: self.time + t,
+                            time: ctx.time + t,
                             process: event.process,
                         })),
                         Effect::Event(mut e) =>{
-                            e.time += self.time;
+                            e.time += ctx.time;
                             self.future_events.push(Reverse(e))
                         },
                         Effect::Request(r) => {
@@ -221,7 +250,7 @@ impl Simulation {
                             } else {
                                 // the process can use the resource immediately
                                 self.future_events.push(Reverse(Event {
-                                    time: self.time,
+                                    time: ctx.time,
                                     process: event.process,
                                 }));
                                 res.available -= 1;
@@ -233,7 +262,7 @@ impl Simulation {
                                 Some(p) =>
                                 // some processes in queue: schedule the next.
                                     self.future_events.push(Reverse(Event{
-                                        time: self.time,
+                                        time: ctx.time,
                                         process: p
                                     })),
                                 None => {
@@ -244,7 +273,7 @@ impl Simulation {
                             // after releasing the resource the process
                             // can be resumed
                             self.future_events.push(Reverse(Event {
-                                time: self.time,
+                                time: ctx.time,
                                 process: event.process,
                             }))
                         }
@@ -283,7 +312,7 @@ impl Simulation {
     /// Return `true` if the ending condition was met, `false` otherwise.
     fn check_ending_condition(&self, ending_condition: &EndCondition) -> bool {
         match &ending_condition {
-            EndCondition::Time(t) => if self.time >= *t {
+            EndCondition::Time(t) => if self.context.borrow().time >= *t {
                 return true
             },
             EndCondition::NoEvents => if self.future_events.len() == 0 {
@@ -295,18 +324,6 @@ impl Simulation {
             },
         }
         false
-    }
-}
-
-impl Default for Simulation {
-    fn default() -> Self {
-        Simulation {
-            time: 0.0,
-            processes: Vec::default(),
-            future_events: BinaryHeap::default(),
-            processed_events: Vec::default(),
-            resources: Vec::default(),
-        }
     }
 }
 
@@ -335,17 +352,24 @@ impl Ord for Event {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use Context;
+
     #[test]
     fn it_works() {
         use Simulation;
         use Effect;
         use Event;
 
-        let mut s = Simulation::new();
-        let p = s.create_process(Box::new(|| {
+        let ctx = Rc::new(RefCell::new(Context::new()));
+        let ctx2 = ctx.clone();
+        let mut s = Simulation::new(ctx.clone());
+        let p = s.create_process(Box::new(move || {
             let mut a = 0.0;
             loop {
                 a += 1.0;
+                println!("time {}", ctx.borrow().time());
                 
                 yield Effect::TimeOut(a);
             }
@@ -353,11 +377,11 @@ mod tests {
         s.schedule_event(Event{time: 0.0, process: p});
         s.step();
         s.step();
-        assert_eq!(s.time(), 1.0);
+        assert_eq!(ctx2.borrow().time(), 1.0);
         s.step();
-        assert_eq!(s.time(), 3.0);
+        assert_eq!(ctx2.borrow().time(), 3.0);
         s.step();
-        assert_eq!(s.time(), 6.0);
+        assert_eq!(ctx2.borrow().time(), 6.0);
     }
 
     #[test]
@@ -367,7 +391,8 @@ mod tests {
         use Event;
         use EndCondition;
 
-        let mut s = Simulation::new();
+        let ctx = Rc::new(RefCell::new(Context::new()));
+        let mut s = Simulation::new(ctx.clone());
         let p = s.create_process( Box::new(|| {
             let tik = 0.7;
             loop{
@@ -377,8 +402,8 @@ mod tests {
         }));
         s.schedule_event(Event{time: 0.0, process: p});
         let s = s.run(EndCondition::Time(10.0));
-        println!("{}", s.time());
-        assert!(s.time() >= 10.0);
+        println!("{}", ctx.borrow().time());
+        assert!(ctx.borrow().time() >= 10.0);
     }
 
     #[test]
@@ -388,7 +413,8 @@ mod tests {
         use Event;
         use EndCondition::NoEvents;
 
-        let mut s = Simulation::new();
+        let ctx = Rc::new(RefCell::new(Context::new()));
+        let mut s = Simulation::new(ctx.clone());
         let r = s.create_resource(1);
 
         // simple process that lock the resource for 7 time units
@@ -413,6 +439,6 @@ mod tests {
         
         let s = s.run(NoEvents);
         println!("{:?}", s.processed_events());
-        assert_eq!(s.time(), 10.0);
+        assert_eq!(ctx.borrow().time(), 10.0);
     }
 }
