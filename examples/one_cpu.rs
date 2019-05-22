@@ -7,10 +7,9 @@ use rand::{Rng as RngT, XorShiftRng as Rng};
 
 use desim::{Simulation, Effect, Event, Context};
 use std::rc::Rc;
-use std::cell::RefCell;
 
 fn main(){
-    let ctx = Rc::new(RefCell::new(Context::new()));
+    let ctx = Rc::new(Context::new());
     let mut s = Simulation::new(ctx);
     let cpu = s.create_resource(1);
     let p1 = s.create_process(Box::new(move || {
