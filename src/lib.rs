@@ -234,11 +234,11 @@ impl Simulation {
                 match Pin::new(self.processes[event.process].as_mut().expect("ERROR. Tried to resume a completed process.")).resume() {
                     GeneratorState::Yielded(y) => match y {
                         Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
-                            time: self.context.time.get() + t,
+                            time: self.context.time() + t,
                             process: event.process,
                         })),
                         Effect::Event(mut e) =>{
-                            e.time += self.context.time.get();
+                            e.time += self.context.time();
                             self.future_events.push(Reverse(e))
                         },
                         Effect::Request(r) => {
@@ -249,7 +249,7 @@ impl Simulation {
                             } else {
                                 // the process can use the resource immediately
                                 self.future_events.push(Reverse(Event {
-                                    time: self.context.time.get(),
+                                    time: self.context.time(),
                                     process: event.process,
                                 }));
                                 res.available -= 1;
@@ -261,7 +261,7 @@ impl Simulation {
                                 Some(p) =>
                                 // some processes in queue: schedule the next.
                                     self.future_events.push(Reverse(Event{
-                                        time: self.context.time.get(),
+                                        time: self.context.time(),
                                         process: p
                                     })),
                                 None => {
@@ -272,7 +272,7 @@ impl Simulation {
                             // after releasing the resource the process
                             // can be resumed
                             self.future_events.push(Reverse(Event {
-                                time: self.context.time.get(),
+                                time: self.context.time(),
                                 process: event.process,
                             }))
                         }
