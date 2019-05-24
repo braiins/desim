@@ -236,6 +236,9 @@ impl<T> Simulation<T> {
         pid: ProcessId,
         process: Box<dyn Generator<Yield = Effect, Return = ()> + Unpin>,
     ) {
+        if self.processes.contains_key(&pid) {
+            panic!("ERROR: duplicate PID {}", pid);
+        }
         self.processes.insert(pid, Some(process));
     }
 
