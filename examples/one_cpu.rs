@@ -8,8 +8,13 @@ use rand::{Rng as RngT, XorShiftRng as Rng};
 use desim::{Simulation, Effect, Event, Context};
 use std::rc::Rc;
 
+enum Message {
+    Message1,
+    Message2
+}
+
 fn main(){
-    let ctx = Rc::new(Context::new());
+    let ctx = Rc::new(Context::<Message>::new());
     let mut s = Simulation::new(ctx);
     let cpu = s.create_resource(1);
     let p1 = s.create_process(Box::new(move || {

@@ -71,12 +71,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 #![feature(generators, generator_trait)]
 use std::ops::{Generator, GeneratorState};
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque, HashMap};
 use std::cmp::{Ordering, Reverse};
 use std::thread;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::cell::{Cell};
+use std::cell::{Cell, RefCell};
+use std::iter::FromIterator;
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
@@ -107,13 +108,14 @@ struct Resource {
     queue: VecDeque<ProcessId>,
 }
 
-pub struct Context {
-    time: Cell<f64>
+pub struct Context<T> {
+    time: Cell<f64>,
+    messages: RefCell<HashMap<ProcessId, VecDeque<T>>>
 }
 
-impl Context {
+impl<T> Context<T> {
     /// Create a new `Context` environment.
-    pub fn new() -> Context {
+    pub fn new() -> Context<T> {
         Context::default()
     }
 
@@ -121,13 +123,34 @@ impl Context {
     pub fn time(&self) -> f64 {
         self.time.get()
     }
+
+    pub fn push_message(&self, pid: ProcessId, message: T) {
+        let mut m = self.messages.borrow_mut();
+
+        match m.get_mut(&pid) {
+            Some(vd) => vd.push_back(message),
+            None => {
+                let mut vd = VecDeque::default();
+                vd.push_back(message);
+                m.insert(pid, vd);
+            }
+        }
+    }
+
+    pub fn pop_message(&self, pid: ProcessId) -> Option<T> {
+        match self.messages.borrow_mut().get_mut(&pid) {
+            Some(vd) => vd.pop_front(),
+            None => None
+        }
+    }
 }
 
 
-impl Default for Context {
+impl<T> Default for Context<T> {
     fn default() -> Self {
         Context {
-            time: Cell::new(0.0)
+            time: Cell::new(0.0),
+            messages: RefCell::new(HashMap::default())
         }
     }
 }
@@ -140,8 +163,8 @@ impl Default for Context {
 ///
 /// See the crate-level documentation for more information about how the
 /// simulation framework works
-pub struct Simulation {
-    context: Rc<Context>,
+pub struct Simulation<T> {
+    context: Rc<Context<T>>,
     processes: Vec<Option<Box<dyn Generator<Yield = Effect, Return = ()> + Unpin>>>,
     future_events: BinaryHeap<Reverse<Event>>,
     processed_events: Vec<Event>,
@@ -174,9 +197,9 @@ pub enum EndCondition {
     NSteps(usize),
 }
 
-impl Simulation {
+impl<T> Simulation<T> {
     /// Create a new `Simulation` environment.
-    pub fn new(ctx: Rc<Context>) -> Simulation {
+    pub fn new(ctx: Rc<Context<T>>) -> Simulation<T> {
         Simulation {
             context: ctx,
             processes: Vec::default(),
@@ -294,7 +317,7 @@ impl Simulation {
     }
 
     /// Run the simulation until and ending condition is met.
-    pub fn run(mut self, until: EndCondition) -> Simulation {
+    pub fn run(mut self, until: EndCondition) -> Simulation<T> {
         while !self.check_ending_condition(&until) {
             self.step();
         }
@@ -354,13 +377,18 @@ mod tests {
     use std::rc::Rc;
     use Context;
 
+    enum TestMessage {
+        MessageType1,
+        MessageType2(&'static str)
+    }
+
     #[test]
     fn it_works() {
         use Simulation;
         use Effect;
         use Event;
 
-        let ctx = Rc::new(Context::new());
+        let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
         let p = s.create_process(Box::new(move || {
@@ -389,7 +417,7 @@ mod tests {
         use Event;
         use EndCondition;
 
-        let ctx = Rc::new(Context::new());
+        let ctx = Rc::new(Context::<TestMessage>::new());
         let mut s = Simulation::new(ctx.clone());
         let p = s.create_process( Box::new(|| {
             let tik = 0.7;
@@ -411,7 +439,7 @@ mod tests {
         use Event;
         use EndCondition::NoEvents;
 
-        let ctx = Rc::new(Context::new());
+        let ctx = Rc::new(Context::<TestMessage>::new());
         let mut s = Simulation::new(ctx.clone());
         let r = s.create_resource(1);
 
