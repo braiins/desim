@@ -17,7 +17,7 @@ fn main(){
     let ctx = Rc::new(Context::<Message>::new());
     let mut s = Simulation::new(ctx);
     let cpu = s.create_resource(1);
-    let p1 = s.create_process(Box::new(move || {
+    s.create_process(1, Box::new(move || {
         for _ in 0..10 {
             // wait for the cpu to be available
             yield Effect::Request(cpu);
@@ -27,7 +27,7 @@ fn main(){
             yield Effect::Release(cpu);
         }
     }));
-    let p2 = s.create_process(Box::new(move || {
+    s.create_process(2, Box::new(move || {
         let mut rng = Rng::new_unseeded();
         loop{
             // wait for the CPU
@@ -39,7 +39,7 @@ fn main(){
         }
     }));
     // let p1 to start immediately...
-    s.schedule_event(Event{time: 0.0, process: p1});
+    s.schedule_event(Event{time: 0.0, process: 1});
     // ...and p2 after 17 time units
-    s.schedule_event(Event{time: 17.0, process: p2});
+    s.schedule_event(Event{time: 17.0, process: 2});
 }
