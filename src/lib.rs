@@ -77,12 +77,11 @@ use std::thread;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::cell::{Cell, RefCell};
-use std::iter::FromIterator;
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
 #[derive(Debug, Copy, Clone)]
-pub enum Effect {
+pub enum Effect<T> {
     /// The process that yields this effect will be resumed
     /// after the speified time
     TimeOut(f64),
@@ -95,7 +94,9 @@ pub enum Effect {
     /// Keep the process' state until it is resumed by another event.
     Wait,
     /// Interrupt another process
-    Interrupt(ProcessId)
+    Interrupt(ProcessId),
+    /// Send message to process (with latency)
+    SendMessage(ProcessId, T, f64)
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
@@ -177,7 +178,7 @@ impl<T> Default for Context<T> {
 /// simulation framework works
 pub struct Simulation<T> {
     context: Rc<Context<T>>,
-    processes: HashMap<ProcessId, Option<Box<dyn Generator<Yield = Effect, Return = ()> + Unpin>>>,
+    processes: HashMap<ProcessId, Option<Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>>>,
     future_events: BinaryHeap<Reverse<Event>>,
     processed_events: Vec<Event>,
     resources: Vec<Resource>,
@@ -234,7 +235,7 @@ impl<T> Simulation<T> {
     pub fn create_process(
         &mut self,
         pid: ProcessId,
-        process: Box<dyn Generator<Yield = Effect, Return = ()> + Unpin>,
+        process: Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>,
     ) {
         if self.processes.contains_key(&pid) {
             panic!("ERROR: duplicate PID {}", pid);
@@ -324,6 +325,17 @@ impl<T> Simulation<T> {
                                 process: event.process,
                             }))
                         }
+                        Effect::SendMessage(pid, message, delay) => {
+                            self.context.push_message(pid, message);
+                            self.future_events.push(Reverse(Event {
+                                time: self.context.time() + delay,
+                                process: pid,
+                            }));
+                            self.future_events.push(Reverse(Event {
+                                time: self.context.time(),
+                                process: event.process,
+                            }))
+                        }
                         Effect::Wait => {}
                     },
                     GeneratorState::Complete(_) => {
@@ -402,6 +414,7 @@ mod tests {
     use std::rc::Rc;
     use Context;
 
+    #[derive(Debug, Copy, Clone, PartialEq)]
     enum TestMessage {
         MessageType1,
         MessageType2(&'static str)
@@ -416,7 +429,7 @@ mod tests {
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
-        let p = s.create_process(1, Box::new(move || {
+        s.create_process(1, Box::new(move || {
             let mut a = 0.0;
             loop {
                 a += 1.0;
@@ -524,6 +537,42 @@ mod tests {
         s.schedule_event(Event{time: 0.0, process: 1});
         s.schedule_event(Event{time: 0.0, process: 2});
         s.step();
+        s.step();
+        s.step();
+        s.step();
+        s.step();
+        s.step();
+    }
+
+    #[test]
+    fn messaging() {
+        use Simulation;
+        use Effect;
+        use Event;
+
+        let ctx = Rc::new(Context::<TestMessage>::new());
+        let ctx2 = ctx.clone();
+        let mut s = Simulation::new(ctx.clone());
+        s.create_process(1, Box::new(move || {
+            yield Effect::Wait;
+            println!("process #1: time {}", ctx.time());
+
+            assert_eq!(ctx.time(), 1.2);
+
+            let m1 = ctx.pop_message(1);
+            assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there"));
+            let m2 = ctx.pop_message(1);
+            assert!(m2.is_none());
+        }));
+
+        s.create_process(2, Box::new(move || {
+            yield Effect::TimeOut(1.0);
+            println!("{}: sending message to process #1", ctx2.time());
+            yield Effect::SendMessage(1, TestMessage::MessageType2("hello there"), 0.2);
+        }));
+
+        s.schedule_event(Event{time: 0.0, process: 1});
+        s.schedule_event(Event{time: 0.0, process: 2});
         s.step();
         s.step();
         s.step();
