@@ -12,11 +12,15 @@ the experimental _generators_ (coroutine) rust feature.
 
 You can read the [API documentation here](docs.rs/desim)
 
-**This project is blocked waiting for some features related to _generators_.
+*This project is blocked waiting for some features related to _generators_.
 In particular the possibility to resume the generator with arguments.
 The implementation of the Clone trait for generators, such that one can clone
 the instructions of the generator without copying the current state, would
-much improve the usability of this crate.**
+much improve the usability of this crate.*
+
+**This is a forked version made by quantverse/braiins to add preliminary support
+of context/interruptions/messaging before generator resume arguments are
+implemented in Rust**.
 
 ## Usage
 To use the framework, add the following line to your Cargo.toml:
