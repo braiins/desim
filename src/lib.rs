@@ -290,97 +290,106 @@ impl<T> Simulation<T> {
         match self.future_events.pop() {
             Some(Reverse(event)) => {
                 self.context.time.set(event.time);
-                match Pin::new(self.processes[event.process].as_mut().expect("ERROR. Tried to resume a completed process.")).resume() {
-                    GeneratorState::Yielded(y) => match y {
-                        Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
-                            time: self.context.time() + t,
-                            process: event.process,
-                        })),
-                        Effect::Event(mut e) =>{
-                            e.time += self.context.time();
-                            self.future_events.push(Reverse(e))
-                        },
-                        Effect::Request(r) => {
-                            let mut res = &mut self.resources[r];
-                            if res.available == 0 {
-                                // enqueue the process
-                                res.queue.push_back(event.process);
-                            } else {
-                                // the process can use the resource immediately
-                                self.future_events.push(Reverse(Event {
-                                    time: self.context.time(),
-                                    process: event.process,
-                                }));
-                                res.available -= 1;
-                            }
-                        }
-                        Effect::Release(r) => {
-                            let res = &mut self.resources[r];
-                            match res.queue.pop_front() {
-                                Some(p) =>
-                                // some processes in queue: schedule the next.
-                                    self.future_events.push(Reverse(Event{
-                                        time: self.context.time(),
-                                        process: p
-                                    })),
-                                None => {
-                                    assert!(res.available < res.allocated);
-                                    res.available += 1;
-                                }
-                            }
-                            // after releasing the resource the process
-                            // can be resumed
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: event.process,
-                            }))
-                        }
-                        Effect::Interrupt(pid) => {
-                            self.context.interrupt(pid);
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: pid,
-                            }));
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: event.process,
-                            }))
-                        }
-                        Effect::SendMessage(pid, message, delay) => {
-                            self.context.push_message(pid, message);
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time() + delay,
-                                process: pid,
-                            }));
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: event.process,
-                            }))
-                        }
-                        Effect::ScheduleProcess(pid, generator) => {
-                            self.create_process(pid, generator);
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: event.process,
-                            }));
-                            self.future_events.push(Reverse(Event {
-                                time: self.context.time(),
-                                process: pid,
-                            }))
 
+                match self.processes[event.process].as_mut() {
+                    Some(gg) => {
+                        match Pin::new(gg).resume() {
+                            GeneratorState::Yielded(y) => match y {
+                                Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
+                                    time: self.context.time() + t,
+                                    process: event.process,
+                                })),
+                                Effect::Event(mut e) =>{
+                                    e.time += self.context.time();
+                                    self.future_events.push(Reverse(e))
+                                },
+                                Effect::Request(r) => {
+                                    let mut res = &mut self.resources[r];
+                                    if res.available == 0 {
+                                        // enqueue the process
+                                        res.queue.push_back(event.process);
+                                    } else {
+                                        // the process can use the resource immediately
+                                        self.future_events.push(Reverse(Event {
+                                            time: self.context.time(),
+                                            process: event.process,
+                                        }));
+                                        res.available -= 1;
+                                    }
+                                }
+                                Effect::Release(r) => {
+                                    let res = &mut self.resources[r];
+                                    match res.queue.pop_front() {
+                                        Some(p) =>
+                                        // some processes in queue: schedule the next.
+                                            self.future_events.push(Reverse(Event{
+                                                time: self.context.time(),
+                                                process: p
+                                            })),
+                                        None => {
+                                            assert!(res.available < res.allocated);
+                                            res.available += 1;
+                                        }
+                                    }
+                                    // after releasing the resource the process
+                                    // can be resumed
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: event.process,
+                                    }))
+                                }
+                                Effect::Interrupt(pid) => {
+                                    self.context.interrupt(pid);
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: pid,
+                                    }));
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: event.process,
+                                    }))
+                                }
+                                Effect::SendMessage(pid, message, delay) => {
+                                    self.context.push_message(pid, message);
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time() + delay,
+                                        process: pid,
+                                    }));
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: event.process,
+                                    }))
+                                }
+                                Effect::ScheduleProcess(pid, generator) => {
+                                    self.create_process(pid, generator);
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: event.process,
+                                    }));
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: pid,
+                                    }))
+
+                                }
+                                Effect::Wait => {}
+                            },
+                            GeneratorState::Complete(_) => {
+                                // FIXME: removing the process from the vector would invalidate
+                                // all existing `ProcessId`s, but keeping it would be a
+                                // waste of space since it is completed.
+                                // May be worth to use another data structure.
+                                // At least let's remove the generator itself.
+                                self.processes[event.process].take();
+                            }
                         }
-                        Effect::Wait => {}
+                        self.processed_events.push(event);
+
                     },
-                    GeneratorState::Complete(_) => {
-                        // FIXME: removing the process from the vector would invalidate
-                        // all existing `ProcessId`s, but keeping it would be a
-                        // waste of space since it is completed.
-                        // May be worth to use another data structure.
-                        // At least let's remove the generator itself.
-                        self.processes[event.process].take();
+                    None => {
+                        // the process is already completed, we won't attempt to resume it
                     }
                 }
-                self.processed_events.push(event);
             }
             None => {}
         }
@@ -551,6 +560,7 @@ mod tests {
 
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
+        let ctx3 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
@@ -581,6 +591,8 @@ mod tests {
         s.step();
         s.step();
         s.step();
+        s.step();
+        assert_eq!(ctx3.time(), 2.0);
     }
 
     #[test]
