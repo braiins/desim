@@ -80,7 +80,7 @@ use std::cell::{Cell, RefCell};
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
-#[derive(Debug, Copy, Clone)]
+//#[derive(Debug, Copy, Clone)]
 pub enum Effect<T> {
     /// The process that yields this effect will be resumed
     /// after the speified time
@@ -96,7 +96,9 @@ pub enum Effect<T> {
     /// Interrupt another process
     Interrupt(ProcessId),
     /// Send message to process (with latency)
-    SendMessage(ProcessId, T, f64)
+    SendMessage(ProcessId, T, f64),
+    /// Create and immediately schedule a new process
+    ScheduleProcess(ProcessId, Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>)
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
@@ -113,6 +115,7 @@ struct Resource {
 
 pub struct Context<T> {
     time: Cell<f64>,
+    next_pid: Cell<ProcessId>,
     messages: RefCell<HashMap<ProcessId, VecDeque<T>>>,
     interrupted: RefCell<HashSet<ProcessId>>
 }
@@ -155,6 +158,13 @@ impl<T> Context<T> {
     pub fn check_interrupted(&self, pid: ProcessId) -> bool {
         self.interrupted.borrow_mut().remove(&pid)
     }
+
+    /// Reserves PID and returns it
+    pub fn reserve_pid(&self) -> ProcessId {
+        let pid = self.next_pid.get();
+        self.next_pid.set(pid + 1);
+        pid
+    }
 }
 
 
@@ -162,6 +172,7 @@ impl<T> Default for Context<T> {
     fn default() -> Self {
         Context {
             time: Cell::new(0.0),
+            next_pid: Cell::new(0),
             messages: RefCell::new(HashMap::default()),
             interrupted: RefCell::new(HashSet::default())
         }
@@ -227,13 +238,6 @@ impl<T> Simulation<T> {
         self.processed_events.as_slice()
     }
 
-    /// Reserves PID and returns it
-    pub fn reserve_pid(&mut self) -> ProcessId {
-        let pid = self.processes.len();
-        self.processes.push(None);
-        pid
-    }
-
     /// Create a process. Requires valid PID.
     ///
     /// For more information about a process, see the crate level documentation
@@ -243,8 +247,14 @@ impl<T> Simulation<T> {
         pid: ProcessId,
         process: Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>,
     ) {
-        if pid >= self.processes.len() {
+        let next_pid = self.context.next_pid.get();
+
+        if pid >= next_pid {
             panic!("ERROR: invalid PID {}", pid);
+        }
+
+        for _i in self.processes.len()..next_pid {
+            self.processes.push(None);
         }
 
         if self.processes[pid].is_some() {
@@ -347,6 +357,18 @@ impl<T> Simulation<T> {
                                 process: event.process,
                             }))
                         }
+                        Effect::ScheduleProcess(pid, generator) => {
+                            self.create_process(pid, generator);
+                            self.future_events.push(Reverse(Event {
+                                time: self.context.time(),
+                                process: event.process,
+                            }));
+                            self.future_events.push(Reverse(Event {
+                                time: self.context.time(),
+                                process: pid,
+                            }))
+
+                        }
                         Effect::Wait => {}
                     },
                     GeneratorState::Complete(_) => {
@@ -440,7 +462,7 @@ mod tests {
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
-        let p1 = s.reserve_pid();
+        let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             let mut a = 0.0;
             loop {
@@ -469,7 +491,7 @@ mod tests {
 
         let ctx = Rc::new(Context::<TestMessage>::new());
         let mut s = Simulation::new(ctx.clone());
-        let p1 = s.reserve_pid();
+        let p1 = ctx.reserve_pid();
         s.create_process(p1,  Box::new(|| {
             let tik = 0.7;
             loop{
@@ -495,14 +517,14 @@ mod tests {
         let r = s.create_resource(1);
 
         // simple process that lock the resource for 7 time units
-        let p1 = s.reserve_pid();
+        let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             yield Effect::Request(r);
             yield Effect::TimeOut(7.0);
             yield Effect::Release(r);
         }));
         // simple process that holds the resource for 3 time units
-        let p2 = s.reserve_pid();
+        let p2 = ctx.reserve_pid();
         s.create_process(p2, Box::new(move || {
             yield Effect::Request(r);
             yield Effect::TimeOut(3.0);
@@ -530,7 +552,7 @@ mod tests {
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
-        let p1 = s.reserve_pid();
+        let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             yield Effect::TimeOut(1.0);
             println!("process #1: time {}", ctx.time());
@@ -544,7 +566,7 @@ mod tests {
 
         }));
 
-        let p2 = s.reserve_pid();
+        let p2 = ctx2.reserve_pid();
         s.create_process(p2, Box::new(move || {
             yield Effect::TimeOut(1.1);
             println!("{}: interrupting process #1", ctx2.time());
@@ -570,7 +592,7 @@ mod tests {
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
-        let p1 = s.reserve_pid();
+        let p1 = ctx.reserve_pid();
         println!("process #1 ID: {}", p1);
         s.create_process(p1, Box::new(move || {
             yield Effect::Wait;
@@ -584,7 +606,7 @@ mod tests {
             assert!(m2.is_none());
         }));
 
-        let p2 = s.reserve_pid();
+        let p2 = ctx2.reserve_pid();
         println!("process #2 ID: {}", p2);
 
         s.create_process(p2, Box::new(move || {
@@ -600,5 +622,47 @@ mod tests {
         s.step();
         s.step();
         s.step();
+    }
+
+    #[test]
+    fn schedule_process() {
+        use Simulation;
+        use Effect;
+        use Event;
+
+        let ctx = Rc::new(Context::<TestMessage>::new());
+        let mut s = Simulation::new(ctx.clone());
+        let p1 = ctx.reserve_pid();
+        println!("P #1 ID: {}", p1);
+
+        let ctx3 = ctx.clone();
+
+        s.create_process(p1, Box::new(move || {
+            yield Effect::TimeOut(1.0);
+            println!("process #1: time {}", ctx.time());
+
+            assert_eq!(ctx.time(), 1.0);
+
+            let p2 = ctx.reserve_pid();
+            println!("P #2 ID: {}", p2);
+
+            let ctx2 = ctx.clone();
+
+            yield Effect::ScheduleProcess(p2, Box::new(move || {
+                println!("process #2: time {}", ctx2.time());
+                yield Effect::TimeOut(1.0);
+                println!("process #2: time {}", ctx2.time());
+                assert_eq!(ctx2.time(), 2.0);
+            }))
+        }));
+
+
+        s.schedule_event(Event{time: 0.0, process: p1});
+        s.step();
+        s.step();
+        s.step();
+        s.step();
+        s.step();
+        assert_eq!(ctx3.time(), 2.0);
     }
 }

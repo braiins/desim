@@ -15,9 +15,10 @@ enum Message {
 
 fn main(){
     let ctx = Rc::new(Context::<Message>::new());
+    let ctx2 = ctx.clone();
     let mut s = Simulation::new(ctx);
     let cpu = s.create_resource(1);
-    let p1 = s.reserve_pid();
+    let p1 = ctx2.reserve_pid();
     s.create_process(p1, Box::new(move || {
         for _ in 0..10 {
             // wait for the cpu to be available
@@ -28,7 +29,7 @@ fn main(){
             yield Effect::Release(cpu);
         }
     }));
-    let p2 = s.reserve_pid();
+    let p2 = ctx2.reserve_pid();
     s.create_process(p2, Box::new(move || {
         let mut rng = Rng::new_unseeded();
         loop{
