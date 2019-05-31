@@ -95,8 +95,10 @@ pub enum Effect<T> {
     Wait,
     /// Interrupt another process
     Interrupt(ProcessId),
-    /// Send message to process (with latency)
+    /// Send message to process (with latency), schedules delivering automatically
     SendMessage(ProcessId, T, f64),
+    /// Deliver message to process (now)
+    DeliverMessage(ProcessId, T),
     /// Create and immediately schedule a new process
     ScheduleProcess(ProcessId, Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>)
 }
@@ -221,7 +223,7 @@ pub enum EndCondition {
     NSteps(usize),
 }
 
-impl<T> Simulation<T> {
+impl<T: 'static> Simulation<T> {
     /// Create a new `Simulation` environment.
     pub fn new(ctx: Rc<Context<T>>) -> Simulation<T> {
         Simulation {
@@ -349,11 +351,25 @@ impl<T> Simulation<T> {
                                         process: event.process,
                                     }))
                                 }
-                                Effect::SendMessage(pid, message, delay) => {
+                                Effect::DeliverMessage(pid, message) => {
                                     self.context.push_message(pid, message);
                                     self.future_events.push(Reverse(Event {
-                                        time: self.context.time() + delay,
+                                        time: self.context.time(),
                                         process: pid,
+                                    }));
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time(),
+                                        process: event.process,
+                                    }))
+                                }
+                                Effect::SendMessage(pid, message, delay) => {
+                                    let xpid = self.context.reserve_pid();
+                                    self.create_process(xpid, Box::new(move || {
+                                        yield Effect::DeliverMessage(pid, message);
+                                    }));
+                                    self.future_events.push(Reverse(Event {
+                                        time: self.context.time() + delay,
+                                        process: xpid,
                                     }));
                                     self.future_events.push(Reverse(Event {
                                         time: self.context.time(),
@@ -603,6 +619,7 @@ mod tests {
 
         let ctx = Rc::new(Context::<TestMessage>::new());
         let ctx2 = ctx.clone();
+        let ctx3 = ctx.clone();
         let mut s = Simulation::new(ctx.clone());
         let p1 = ctx.reserve_pid();
         println!("process #1 ID: {}", p1);
@@ -610,10 +627,20 @@ mod tests {
             yield Effect::Wait;
             println!("process #1: time {}", ctx.time());
 
-            assert_eq!(ctx.time(), 1.2);
+            assert_eq!(ctx.time(), 1.0);
 
             let m1 = ctx.pop_message(p1);
             assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there"));
+            let m2 = ctx.pop_message(p1);
+            assert!(m2.is_none());
+
+            yield Effect::Wait;
+            println!("process #1: time {} here we go again", ctx.time());
+
+            assert_eq!(ctx.time(), 1.2);
+
+            let m1 = ctx.pop_message(p1);
+            assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there 2"));
             let m2 = ctx.pop_message(p1);
             assert!(m2.is_none());
         }));
@@ -623,8 +650,11 @@ mod tests {
 
         s.create_process(p2, Box::new(move || {
             yield Effect::TimeOut(1.0);
-            println!("{}: sending message to process #1", ctx2.time());
-            yield Effect::SendMessage(p1, TestMessage::MessageType2("hello there"), 0.2);
+            println!("{}: delivering message to process #1", ctx2.time());
+            yield Effect::DeliverMessage(p1, TestMessage::MessageType2("hello there"));
+            println!("{}: sending another message to process #1", ctx2.time());
+            yield Effect::SendMessage(p1, TestMessage::MessageType2("hello there 2"), 0.2);
+            println!("{}: ending process #2", ctx2.time());
         }));
 
         s.schedule_event(Event{time: 0.0, process: p1});
@@ -634,6 +664,11 @@ mod tests {
         s.step();
         s.step();
         s.step();
+        s.step();
+        s.step();
+        s.step();
+        assert_eq!(ctx3.time(), 1.2);
+
     }
 
     #[test]
