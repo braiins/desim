@@ -75,13 +75,12 @@ use std::collections::{BinaryHeap, VecDeque, HashMap, HashSet};
 use std::cmp::{Ordering, Reverse};
 use std::thread;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::cell::{Cell, RefCell};
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
 //#[derive(Debug, Copy, Clone)]
-pub enum Effect<T> {
+pub enum Effect<'a, T> {
     /// The process that yields this effect will be resumed
     /// after the speified time
     TimeOut(f64),
@@ -100,7 +99,7 @@ pub enum Effect<T> {
     /// Deliver message to process (now)
     DeliverMessage(ProcessId, T),
     /// Create and immediately schedule a new process
-    ScheduleProcess(ProcessId, Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>)
+    ScheduleProcess(ProcessId, Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>)
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
@@ -189,9 +188,9 @@ impl<T> Default for Context<T> {
 ///
 /// See the crate-level documentation for more information about how the
 /// simulation framework works
-pub struct Simulation<T> {
-    context: Rc<Context<T>>,
-    processes: Vec<Option<Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>>>,
+pub struct Simulation<'a, T> {
+    context: &'a Context<T>,
+    processes: Vec<Option<Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>>>,
     future_events: BinaryHeap<Reverse<Event>>,
     processed_events: Vec<Event>,
     resources: Vec<Resource>,
@@ -223,9 +222,9 @@ pub enum EndCondition {
     NSteps(usize),
 }
 
-impl<T: 'static> Simulation<T> {
+impl<'a, T: 'static> Simulation<'a, T> {
     /// Create a new `Simulation` environment.
-    pub fn new(ctx: Rc<Context<T>>) -> Simulation<T> {
+    pub fn new(ctx: &'a Context<T>) -> Simulation<'a, T> {
         Simulation {
             context: ctx,
             processes: Vec::default(),
@@ -247,7 +246,7 @@ impl<T: 'static> Simulation<T> {
     pub fn create_process(
         &mut self,
         pid: ProcessId,
-        process: Box<dyn Generator<Yield = Effect<T>, Return = ()> + Unpin>,
+        process: Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>,
     ) {
         let next_pid = self.context.next_pid.get();
 
@@ -412,7 +411,7 @@ impl<T: 'static> Simulation<T> {
     }
 
     /// Run the simulation until and ending condition is met.
-    pub fn run(mut self, until: EndCondition) -> Simulation<T> {
+    pub fn run(mut self, until: EndCondition) -> Simulation<'a, T> {
         while !self.check_ending_condition(&until) {
             self.step();
         }
@@ -484,15 +483,15 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
-        let ctx2 = ctx.clone();
-        let mut s = Simulation::new(ctx.clone());
+        let ctx = Context::<TestMessage>::new();
+        let mut s = Simulation::new(&ctx);
+        let ctxref = &ctx;
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             let mut a = 0.0;
             loop {
                 a += 1.0;
-                println!("time {}", ctx.time());
+                println!("time {}", ctxref.time());
                 
                 yield Effect::TimeOut(a);
             }
@@ -500,11 +499,11 @@ mod tests {
         s.schedule_event(Event{time: 0.0, process: p1});
         s.step();
         s.step();
-        assert_eq!(ctx2.time(), 1.0);
+        assert_eq!(ctx.time(), 1.0);
         s.step();
-        assert_eq!(ctx2.time(), 3.0);
+        assert_eq!(ctx.time(), 3.0);
         s.step();
-        assert_eq!(ctx2.time(), 6.0);
+        assert_eq!(ctx.time(), 6.0);
     }
 
     #[test]
@@ -514,8 +513,8 @@ mod tests {
         use Event;
         use EndCondition;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
-        let mut s = Simulation::new(ctx.clone());
+        let ctx = Context::<TestMessage>::new();
+        let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
         s.create_process(p1,  Box::new(|| {
             let tik = 0.7;
@@ -538,7 +537,7 @@ mod tests {
         use EndCondition::NoEvents;
 
         let ctx = Rc::new(Context::<TestMessage>::new());
-        let mut s = Simulation::new(ctx.clone());
+        let mut s = Simulation::new(&ctx);
         let r = s.create_resource(1);
 
         // simple process that lock the resource for 7 time units
@@ -574,28 +573,27 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
-        let ctx2 = ctx.clone();
-        let ctx3 = ctx.clone();
-        let mut s = Simulation::new(ctx.clone());
+        let ctx = Context::<TestMessage>::new();
+        let ctxref = &ctx;
+        let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             yield Effect::TimeOut(1.0);
-            println!("process #1: time {}", ctx.time());
-            assert!(!ctx.check_interrupted(p1));
-            assert_eq!(ctx.time(), 1.0);
+            println!("process #1: time {}", ctxref.time());
+            assert!(!ctxref.check_interrupted(p1));
+            assert_eq!(ctxref.time(), 1.0);
 
             yield Effect::TimeOut(1.0);
-            println!("process #1: time {}", ctx.time());
-            assert!(ctx.check_interrupted(p1));
-            assert_eq!(ctx.time(), 1.1);
+            println!("process #1: time {}", ctxref.time());
+            assert!(ctxref.check_interrupted(p1));
+            assert_eq!(ctxref.time(), 1.1);
 
         }));
 
-        let p2 = ctx2.reserve_pid();
+        let p2 = ctx.reserve_pid();
         s.create_process(p2, Box::new(move || {
             yield Effect::TimeOut(1.1);
-            println!("{}: interrupting process #1", ctx2.time());
+            println!("{}: interrupting process #1", ctxref.time());
             yield Effect::Interrupt(p1);
         }));
 
@@ -608,7 +606,7 @@ mod tests {
         s.step();
         s.step();
         s.step();
-        assert_eq!(ctx3.time(), 2.0);
+        assert_eq!(ctx.time(), 2.0);
     }
 
     #[test]
@@ -617,44 +615,43 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
-        let ctx2 = ctx.clone();
-        let ctx3 = ctx.clone();
-        let mut s = Simulation::new(ctx.clone());
+        let ctx = Context::<TestMessage>::new();
+        let ctxref = &ctx;
+        let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
         println!("process #1 ID: {}", p1);
         s.create_process(p1, Box::new(move || {
             yield Effect::Wait;
-            println!("process #1: time {}", ctx.time());
+            println!("process #1: time {}", ctxref.time());
 
-            assert_eq!(ctx.time(), 1.0);
+            assert_eq!(ctxref.time(), 1.0);
 
-            let m1 = ctx.pop_message(p1);
+            let m1 = ctxref.pop_message(p1);
             assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there"));
-            let m2 = ctx.pop_message(p1);
+            let m2 = ctxref.pop_message(p1);
             assert!(m2.is_none());
 
             yield Effect::Wait;
-            println!("process #1: time {} here we go again", ctx.time());
+            println!("process #1: time {} here we go again", ctxref.time());
 
-            assert_eq!(ctx.time(), 1.2);
+            assert_eq!(ctxref.time(), 1.2);
 
-            let m1 = ctx.pop_message(p1);
+            let m1 = ctxref.pop_message(p1);
             assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there 2"));
-            let m2 = ctx.pop_message(p1);
+            let m2 = ctxref.pop_message(p1);
             assert!(m2.is_none());
         }));
 
-        let p2 = ctx2.reserve_pid();
+        let p2 = ctx.reserve_pid();
         println!("process #2 ID: {}", p2);
 
         s.create_process(p2, Box::new(move || {
             yield Effect::TimeOut(1.0);
-            println!("{}: delivering message to process #1", ctx2.time());
+            println!("{}: delivering message to process #1", ctxref.time());
             yield Effect::DeliverMessage(p1, TestMessage::MessageType2("hello there"));
-            println!("{}: sending another message to process #1", ctx2.time());
+            println!("{}: sending another message to process #1", ctxref.time());
             yield Effect::SendMessage(p1, TestMessage::MessageType2("hello there 2"), 0.2);
-            println!("{}: ending process #2", ctx2.time());
+            println!("{}: ending process #2", ctxref.time());
         }));
 
         s.schedule_event(Event{time: 0.0, process: p1});
@@ -667,7 +664,7 @@ mod tests {
         s.step();
         s.step();
         s.step();
-        assert_eq!(ctx3.time(), 1.2);
+        assert_eq!(ctx.time(), 1.2);
 
     }
 
@@ -677,30 +674,27 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
-        let mut s = Simulation::new(ctx.clone());
+        let ctx = Context::<TestMessage>::new();
+        let ctxref = &ctx;
+        let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
         println!("P #1 ID: {}", p1);
 
-        let ctx3 = ctx.clone();
-
         s.create_process(p1, Box::new(move || {
             yield Effect::TimeOut(1.0);
-            println!("process #1: time {}", ctx.time());
+            println!("process #1: time {}", ctxref.time());
 
-            assert_eq!(ctx.time(), 1.0);
+            assert_eq!(ctxref.time(), 1.0);
 
-            let p2 = ctx.reserve_pid();
+            let p2 = ctxref.reserve_pid();
             println!("P #2 ID: {}", p2);
 
-            let ctx2 = ctx.clone();
-
             yield Effect::ScheduleProcess(p2, Box::new(move || {
-                println!("process #2: time {}", ctx2.time());
+                println!("process #2: time {}", ctxref.time());
                 yield Effect::TimeOut(1.0);
-                println!("process #2: time {}", ctx2.time());
-                assert_eq!(ctx2.time(), 2.0);
-            }))
+                println!("process #2: time {}", ctxref.time());
+                assert_eq!(ctxref.time(), 2.0);
+            }));
         }));
 
 
@@ -710,6 +704,6 @@ mod tests {
         s.step();
         s.step();
         s.step();
-        assert_eq!(ctx3.time(), 2.0);
+        assert_eq!(ctx.time(), 2.0);
     }
 }
