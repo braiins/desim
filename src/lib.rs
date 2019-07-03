@@ -70,12 +70,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 //!
 
 #![feature(generators, generator_trait)]
-use std::ops::{Generator, GeneratorState};
-use std::collections::{BinaryHeap, VecDeque, HashMap, HashSet};
-use std::cmp::{Ordering, Reverse};
-use std::thread;
-use std::pin::Pin;
+
 use std::cell::{Cell, RefCell};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::ops::{Generator, GeneratorState};
+use std::pin::Pin;
+use std::thread;
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
@@ -99,7 +100,7 @@ pub enum Effect<'a, T> {
     /// Deliver message to process (now)
     DeliverMessage(ProcessId, T),
     /// Create and immediately schedule a new process
-    ScheduleProcess(ProcessId, Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>)
+    ScheduleProcess(ProcessId, Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>),
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
@@ -118,7 +119,7 @@ pub struct Context<T> {
     time: Cell<f64>,
     next_pid: Cell<ProcessId>,
     messages: RefCell<HashMap<ProcessId, VecDeque<T>>>,
-    interrupted: RefCell<HashSet<ProcessId>>
+    interrupted: RefCell<HashSet<ProcessId>>,
 }
 
 impl<T> Context<T> {
@@ -175,7 +176,7 @@ impl<T> Default for Context<T> {
             time: Cell::new(0.0),
             next_pid: Cell::new(0),
             messages: RefCell::new(HashMap::default()),
-            interrupted: RefCell::new(HashSet::default())
+            interrupted: RefCell::new(HashSet::default()),
         }
     }
 }
@@ -190,7 +191,7 @@ impl<T> Default for Context<T> {
 /// simulation framework works
 pub struct Simulation<'a, T> {
     context: &'a Context<T>,
-    processes: Vec<Option<Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>>>,
+    processes: Vec<Option<Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>>>,
     future_events: BinaryHeap<Reverse<Event>>,
     processed_events: Vec<Event>,
     resources: Vec<Resource>,
@@ -249,7 +250,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
     pub fn create_process(
         &mut self,
         pid: ProcessId,
-        process: Box<dyn Generator<Yield = Effect<'a, T>, Return = ()> + Unpin + 'a>,
+        process: Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>,
     ) {
         let next_pid = self.context.next_pid.get();
 
@@ -303,10 +304,10 @@ impl<'a, T: 'static> Simulation<'a, T> {
                                     time: self.context.time() + t,
                                     process: event.process,
                                 })),
-                                Effect::Event(mut e) =>{
+                                Effect::Event(mut e) => {
                                     e.time += self.context.time();
                                     self.future_events.push(Reverse(e))
-                                },
+                                }
                                 Effect::Request(r) => {
                                     let mut res = &mut self.resources[r];
                                     if res.available == 0 {
@@ -326,9 +327,9 @@ impl<'a, T: 'static> Simulation<'a, T> {
                                     match res.queue.pop_front() {
                                         Some(p) =>
                                         // some processes in queue: schedule the next.
-                                            self.future_events.push(Reverse(Event{
+                                            self.future_events.push(Reverse(Event {
                                                 time: self.context.time(),
-                                                process: p
+                                                process: p,
                                             })),
                                         None => {
                                             assert!(res.available < res.allocated);
@@ -388,7 +389,6 @@ impl<'a, T: 'static> Simulation<'a, T> {
                                         time: self.context.time(),
                                         process: pid,
                                     }))
-
                                 }
                                 Effect::Wait => {}
                             },
@@ -402,8 +402,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
                             }
                         }
                         self.processed_events.push(event);
-
-                    },
+                    }
                     None => {
                         // the process is already completed, we won't attempt to resume it
                     }
@@ -420,26 +419,26 @@ impl<'a, T: 'static> Simulation<'a, T> {
         }
         self
     }
-/*
-    pub fn nonblocking_run(mut self, until: EndCondition) -> thread::JoinHandle<Simulation> {
-        thread::spawn(move || {
-            self.run(until)
-        })
-    }
-*/
+    /*
+        pub fn nonblocking_run(mut self, until: EndCondition) -> thread::JoinHandle<Simulation> {
+            thread::spawn(move || {
+                self.run(until)
+            })
+        }
+    */
 
     /// Return `true` if the ending condition was met, `false` otherwise.
     fn check_ending_condition(&self, ending_condition: &EndCondition) -> bool {
         match &ending_condition {
             EndCondition::Time(t) => if self.context.time() >= *t {
-                return true
+                return true;
             },
             EndCondition::NoEvents => if self.future_events.len() == 0 {
-                return true
+                return true;
             },
             // FIXME: what if client call `run(EndCondition::NSteps(n)` after having called `step()` for some times?
             EndCondition::NSteps(n) => if self.processed_events.len() == *n {
-                return true
+                return true;
             },
         }
         false
@@ -472,12 +471,13 @@ impl Ord for Event {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+
     use Context;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
     enum TestMessage {
         MessageType1,
-        MessageType2(&'static str)
+        MessageType2(&'static str),
     }
 
     #[test]
@@ -495,11 +495,11 @@ mod tests {
             loop {
                 a += 1.0;
                 println!("time {}", ctxref.time());
-                
+
                 yield Effect::TimeOut(a);
             }
         }));
-        s.schedule_event(Event{time: 0.0, process: p1});
+        s.schedule_event(Event { time: 0.0, process: p1 });
         s.step();
         s.step();
         assert_eq!(ctx.time(), 1.0);
@@ -519,14 +519,14 @@ mod tests {
         let ctx = Context::<TestMessage>::new();
         let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
-        s.create_process(p1,  Box::new(|| {
+        s.create_process(p1, Box::new(|| {
             let tik = 0.7;
-            loop{
+            loop {
                 println!("tik");
                 yield Effect::TimeOut(tik);
             }
         }));
-        s.schedule_event(Event{time: 0.0, process: p1});
+        s.schedule_event(Event { time: 0.0, process: p1 });
         let s = s.run(EndCondition::Time(10.0));
         println!("{}", ctx.time());
         assert!(ctx.time() >= 10.0);
@@ -559,12 +559,12 @@ mod tests {
         }));
 
         // let p1 start immediately...
-        s.schedule_event(Event{time: 0.0, process: p1});
+        s.schedule_event(Event { time: 0.0, process: p1 });
         // let p2 start after 2 t.u., when r is not available
-        s.schedule_event(Event{time: 2.0, process: p2});
+        s.schedule_event(Event { time: 2.0, process: p2 });
         // p2 will wait r to be free (time 7.0) and its timeout
         // of 3.0 t.u. The simulation will end at time 10.0
-        
+
         let s = s.run(NoEvents);
         println!("{:?}", s.processed_events());
         assert_eq!(ctx.time(), 10.0);
@@ -590,7 +590,6 @@ mod tests {
             println!("process #1: time {}", ctxref.time());
             assert!(ctxref.check_interrupted(p1));
             assert_eq!(ctxref.time(), 1.1);
-
         }));
 
         let p2 = ctx.reserve_pid();
@@ -600,8 +599,8 @@ mod tests {
             yield Effect::Interrupt(p1);
         }));
 
-        s.schedule_event(Event{time: 0.0, process: p1});
-        s.schedule_event(Event{time: 0.0, process: p2});
+        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { time: 0.0, process: p2 });
         s.step();
         s.step();
         s.step();
@@ -657,8 +656,8 @@ mod tests {
             println!("{}: ending process #2", ctxref.time());
         }));
 
-        s.schedule_event(Event{time: 0.0, process: p1});
-        s.schedule_event(Event{time: 0.0, process: p2});
+        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { time: 0.0, process: p2 });
         s.step();
         s.step();
         s.step();
@@ -668,7 +667,6 @@ mod tests {
         s.step();
         s.step();
         assert_eq!(ctx.time(), 1.2);
-
     }
 
     #[test]
@@ -701,7 +699,7 @@ mod tests {
         }));
 
 
-        s.schedule_event(Event{time: 0.0, process: p1});
+        s.schedule_event(Event { time: 0.0, process: p1 });
         s.step();
         s.step();
         s.step();
