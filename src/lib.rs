@@ -234,6 +234,9 @@ impl<'a, T: 'static> Simulation<'a, T> {
         }
     }
 
+    /// Returns reference to the context
+    pub fn context(&self) -> &'a Context<T> { self.context }
+
     /// Returns the log of processed events
     pub fn processed_events(&self) -> &[Event] {
         self.processed_events.as_slice()
@@ -485,7 +488,7 @@ mod tests {
 
         let ctx = Context::<TestMessage>::new();
         let mut s = Simulation::new(&ctx);
-        let ctxref = &ctx;
+        let ctxref = s.context();
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             let mut a = 0.0;
@@ -536,7 +539,7 @@ mod tests {
         use Event;
         use EndCondition::NoEvents;
 
-        let ctx = Rc::new(Context::<TestMessage>::new());
+        let ctx = Context::<TestMessage>::new();
         let mut s = Simulation::new(&ctx);
         let r = s.create_resource(1);
 
@@ -574,8 +577,8 @@ mod tests {
         use Event;
 
         let ctx = Context::<TestMessage>::new();
-        let ctxref = &ctx;
         let mut s = Simulation::new(&ctx);
+        let ctxref = s.context();
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(move || {
             yield Effect::TimeOut(1.0);
