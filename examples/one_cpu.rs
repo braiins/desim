@@ -7,13 +7,10 @@ use rand::{Rng as RngT, XorShiftRng as Rng};
 
 use desim::{Context, Effect, Event, Simulation};
 
-enum Message {
-    Message1,
-    Message2,
-}
+struct Message();
 
 fn main() {
-    let ctx = Context::<Message>::new();
+    let ctx = Context::<Message, f64>::new();
     let mut s = Simulation::new(&ctx);
     let cpu = s.create_resource(1);
     let p1 = ctx.reserve_pid();

@@ -74,19 +74,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
-use std::ops::{Generator, GeneratorState};
+use std::ops::{Generator, GeneratorState, Add, AddAssign};
 use std::pin::Pin;
-use std::thread;
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
 //#[derive(Debug, Copy, Clone)]
-pub enum Effect<'a, T> {
+pub enum Effect<'a, M, T> {
     /// The process that yields this effect will be resumed
     /// after the speified time
-    TimeOut(f64),
+    TimeOut(T),
     /// Yielding this effect it is possible to schedule the specified event
-    Event(Event),
+    Event(Event<T>),
     /// This effect is yielded to request a resource
     Request(ResourceId),
     /// This effect is yielded to release a resource that is not needed anymore.
@@ -96,11 +95,11 @@ pub enum Effect<'a, T> {
     /// Interrupt another process
     Interrupt(ProcessId),
     /// Send message to process (with latency), schedules delivering automatically
-    SendMessage(ProcessId, T, f64),
+    SendMessage(ProcessId, M, T),
     /// Deliver message to process (now)
-    DeliverMessage(ProcessId, T),
+    DeliverMessage(ProcessId, M),
     /// Create and immediately schedule a new process
-    ScheduleProcess(ProcessId, Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>),
+    ScheduleProcess(ProcessId, Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>),
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
@@ -115,25 +114,25 @@ struct Resource {
     queue: VecDeque<ProcessId>,
 }
 
-pub struct Context<T> {
-    time: Cell<f64>,
+pub struct Context<M, T> {
+    time: Cell<T>,
     next_pid: Cell<ProcessId>,
-    messages: RefCell<HashMap<ProcessId, VecDeque<T>>>,
+    messages: RefCell<HashMap<ProcessId, VecDeque<M>>>,
     interrupted: RefCell<HashSet<ProcessId>>,
 }
 
-impl<T> Context<T> {
+impl<M, T> Context<M, T> where T: Default + Copy + Add<Output=T> {
     /// Create a new `Context` environment.
-    pub fn new() -> Context<T> {
+    pub fn new() -> Self {
         Context::default()
     }
 
     /// Returns the current simulation time
-    pub fn time(&self) -> f64 {
+    pub fn time(&self) -> T {
         self.time.get()
     }
 
-    pub fn push_message(&self, pid: ProcessId, message: T) {
+    pub fn push_message(&self, pid: ProcessId, message: M) {
         let mut m = self.messages.borrow_mut();
 
         match m.get_mut(&pid) {
@@ -146,7 +145,7 @@ impl<T> Context<T> {
         }
     }
 
-    pub fn pop_message(&self, pid: ProcessId) -> Option<T> {
+    pub fn pop_message(&self, pid: ProcessId) -> Option<M> {
         match self.messages.borrow_mut().get_mut(&pid) {
             Some(vd) => vd.pop_front(),
             None => None
@@ -170,10 +169,10 @@ impl<T> Context<T> {
 }
 
 
-impl<T> Default for Context<T> {
+impl<M, T> Default for Context<M, T> where T: Default {
     fn default() -> Self {
         Context {
-            time: Cell::new(0.0),
+            time: Cell::new(T::default()),
             next_pid: Cell::new(0),
             messages: RefCell::new(HashMap::default()),
             interrupted: RefCell::new(HashSet::default()),
@@ -189,11 +188,11 @@ impl<T> Default for Context<T> {
 ///
 /// See the crate-level documentation for more information about how the
 /// simulation framework works
-pub struct Simulation<'a, T> {
-    context: &'a Context<T>,
-    processes: Vec<Option<Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>>>,
-    future_events: BinaryHeap<Reverse<Event>>,
-    processed_events: Vec<Event>,
+pub struct Simulation<'a, M, T> {
+    context: &'a Context<M, T>,
+    processes: Vec<Option<Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>>>,
+    future_events: BinaryHeap<Reverse<Event<T>>>,
+    processed_events: Vec<Event<T>>,
     resources: Vec<Resource>,
 }
 
@@ -206,26 +205,26 @@ pub struct ParallelSimulation {
 /// An event that can be scheduled by a process, yelding the `Event` `Effect`
 /// or by the owner of a `Simulation` through the `schedule` method
 #[derive(Debug, Copy, Clone)]
-pub struct Event {
+pub struct Event<T> {
     /// Time interval between the current simulation time and the event schedule
-    pub time: f64,
+    pub time: T,
     /// Process to execute when the event occur
     pub process: ProcessId,
 }
 
 /// Specify which condition must be met for the simulation to stop.
-pub enum EndCondition {
+pub enum EndCondition<T> {
     /// Run the simulation until a certain point in time is reached.
-    Time(f64),
+    Time(T),
     /// Run the simulation until there are no more events scheduled.
     NoEvents,
     /// Execute exactly N steps of the simulation.
     NSteps(usize),
 }
 
-impl<'a, T: 'static> Simulation<'a, T> {
+impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOrd + AddAssign + Add<Output=T> {
     /// Create a new `Simulation` environment.
-    pub fn new(ctx: &'a Context<T>) -> Simulation<'a, T> {
+    pub fn new(ctx: &'a Context<M, T>) -> Simulation<'a, M, T> {
         Simulation {
             context: ctx,
             processes: Vec::default(),
@@ -236,10 +235,10 @@ impl<'a, T: 'static> Simulation<'a, T> {
     }
 
     /// Returns reference to the context
-    pub fn context(&self) -> &'a Context<T> { self.context }
+    pub fn context(&self) -> &'a Context<M, T> { self.context }
 
     /// Returns the log of processed events
-    pub fn processed_events(&self) -> &[Event] {
+    pub fn processed_events(&self) -> &[Event<T>] {
         self.processed_events.as_slice()
     }
 
@@ -250,7 +249,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
     pub fn create_process(
         &mut self,
         pid: ProcessId,
-        process: Box<dyn Generator<Yield=Effect<'a, T>, Return=()> + Unpin + 'a>,
+        process: Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>,
     ) {
         let next_pid = self.context.next_pid.get();
 
@@ -286,7 +285,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
 
     /// Schedule a process to be executed. Another way to schedule events is
     /// yielding `Effect::Event` from a process during the simulation.
-    pub fn schedule_event(&mut self, event: Event) {
+    pub fn schedule_event(&mut self, event: Event<T>) {
         self.future_events.push(Reverse(event));
     }
 
@@ -413,7 +412,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
     }
 
     /// Run the simulation until and ending condition is met.
-    pub fn run(mut self, until: EndCondition) -> Simulation<'a, T> {
+    pub fn run(mut self, until: EndCondition<T>) -> Simulation<'a, M, T> {
         while !self.check_ending_condition(&until) {
             self.step();
         }
@@ -428,7 +427,7 @@ impl<'a, T: 'static> Simulation<'a, T> {
     */
 
     /// Return `true` if the ending condition was met, `false` otherwise.
-    fn check_ending_condition(&self, ending_condition: &EndCondition) -> bool {
+    fn check_ending_condition(&self, ending_condition: &EndCondition<T>) -> bool {
         match &ending_condition {
             EndCondition::Time(t) => if self.context.time() >= *t {
                 return true;
@@ -445,22 +444,22 @@ impl<'a, T: 'static> Simulation<'a, T> {
     }
 }
 
-impl PartialEq for Event {
-    fn eq(&self, other: &Event) -> bool {
+impl<T: PartialEq> PartialEq for Event<T> {
+    fn eq(&self, other: &Event<T>) -> bool {
         self.time == other.time
     }
 }
 
-impl Eq for Event {}
+impl<T: PartialEq> Eq for Event<T> {}
 
-impl PartialOrd for Event {
-    fn partial_cmp(&self, other: &Event) -> Option<Ordering> {
+impl<T: PartialOrd> PartialOrd for Event<T> {
+    fn partial_cmp(&self, other: &Event<T>) -> Option<Ordering> {
         self.time.partial_cmp(&other.time)
     }
 }
 
-impl Ord for Event {
-    fn cmp(&self, other: &Event) -> Ordering {
+impl<T: PartialOrd> Ord for Event<T> {
+    fn cmp(&self, other: &Event<T>) -> Ordering {
         match self.time.partial_cmp(&other.time) {
             Some(o) => o,
             None => panic!("Event time was uncomparable. Maybe a NaN"),
@@ -470,14 +469,11 @@ impl Ord for Event {
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
-
     use Context;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
     enum TestMessage {
-        MessageType1,
-        MessageType2(&'static str),
+        MessageType1(&'static str),
     }
 
     #[test]
@@ -486,7 +482,7 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
         let ctxref = s.context();
         let p1 = ctx.reserve_pid();
@@ -510,13 +506,42 @@ mod tests {
     }
 
     #[test]
+    fn it_works_u64() {
+        use Simulation;
+        use Effect;
+        use Event;
+
+        let ctx = Context::<TestMessage, u64>::new();
+        let mut s = Simulation::new(&ctx);
+        let ctxref = s.context();
+        let p1 = ctx.reserve_pid();
+        s.create_process(p1, Box::new(move || {
+            let mut a: u64 = 0;
+            loop {
+                a += 1000;
+                println!("time {}", ctxref.time());
+
+                yield Effect::TimeOut(a);
+            }
+        }));
+        s.schedule_event(Event { time: 0, process: p1 });
+        s.step();
+        s.step();
+        assert_eq!(ctx.time(), 1000);
+        s.step();
+        assert_eq!(ctx.time(), 3000);
+        s.step();
+        assert_eq!(ctx.time(), 6000);
+    }
+
+    #[test]
     fn run() {
         use Simulation;
         use Effect;
         use Event;
         use EndCondition;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
         s.create_process(p1, Box::new(|| {
@@ -527,7 +552,7 @@ mod tests {
             }
         }));
         s.schedule_event(Event { time: 0.0, process: p1 });
-        let s = s.run(EndCondition::Time(10.0));
+        let _s = s.run(EndCondition::Time(10.0));
         println!("{}", ctx.time());
         assert!(ctx.time() >= 10.0);
     }
@@ -539,7 +564,7 @@ mod tests {
         use Event;
         use EndCondition::NoEvents;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
         let r = s.create_resource(1);
 
@@ -576,7 +601,7 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
         let ctxref = s.context();
         let p1 = ctx.reserve_pid();
@@ -617,7 +642,7 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let ctxref = &ctx;
         let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
@@ -629,7 +654,7 @@ mod tests {
             assert_eq!(ctxref.time(), 1.0);
 
             let m1 = ctxref.pop_message(p1);
-            assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there"));
+            assert_eq!(m1.expect("message expected"), TestMessage::MessageType1("hello there"));
             let m2 = ctxref.pop_message(p1);
             assert!(m2.is_none());
 
@@ -639,7 +664,7 @@ mod tests {
             assert_eq!(ctxref.time(), 1.2);
 
             let m1 = ctxref.pop_message(p1);
-            assert_eq!(m1.expect("message expected"), TestMessage::MessageType2("hello there 2"));
+            assert_eq!(m1.expect("message expected"), TestMessage::MessageType1("hello there 2"));
             let m2 = ctxref.pop_message(p1);
             assert!(m2.is_none());
         }));
@@ -650,9 +675,9 @@ mod tests {
         s.create_process(p2, Box::new(move || {
             yield Effect::TimeOut(1.0);
             println!("{}: delivering message to process #1", ctxref.time());
-            yield Effect::DeliverMessage(p1, TestMessage::MessageType2("hello there"));
+            yield Effect::DeliverMessage(p1, TestMessage::MessageType1("hello there"));
             println!("{}: sending another message to process #1", ctxref.time());
-            yield Effect::SendMessage(p1, TestMessage::MessageType2("hello there 2"), 0.2);
+            yield Effect::SendMessage(p1, TestMessage::MessageType1("hello there 2"), 0.2);
             println!("{}: ending process #2", ctxref.time());
         }));
 
@@ -675,7 +700,7 @@ mod tests {
         use Effect;
         use Event;
 
-        let ctx = Context::<TestMessage>::new();
+        let ctx = Context::<TestMessage, f64>::new();
         let ctxref = &ctx;
         let mut s = Simulation::new(&ctx);
         let p1 = ctx.reserve_pid();
