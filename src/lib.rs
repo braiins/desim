@@ -297,7 +297,7 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
 
                 match self.processes[event.process].as_mut() {
                     Some(gg) => {
-                        match Pin::new(gg).resume() {
+                        match Pin::new(gg).resume(()) {
                             GeneratorState::Yielded(y) => match y {
                                 Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
                                     time: self.context.time() + t,
