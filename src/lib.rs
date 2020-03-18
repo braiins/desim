@@ -77,7 +77,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Generator, GeneratorState};
 use std::pin::Pin;
 
-pub trait Time {
+pub trait Time: PartialOrd + PartialEq {
     type Duration;
     fn add(&self, duration: Self::Duration) -> Self;
 }
@@ -236,7 +236,7 @@ pub enum EndCondition<T> {
     NSteps(usize),
 }
 
-impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + PartialOrd + Time {
+impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
     /// Create a new `Simulation` environment.
     pub fn new(ctx: &'a Context<M, T>) -> Simulation<'a, M, T> {
         Simulation {
