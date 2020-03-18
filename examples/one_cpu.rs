@@ -5,12 +5,22 @@ extern crate rand;
 
 use rand::{Rng as RngT, XorShiftRng as Rng};
 
-use desim::{Context, Effect, Event, Simulation};
+use desim::{Context, Effect, Simulation, Time, Event};
 
 struct Message();
 
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+struct Timestamp(f64);
+
+impl Time for Timestamp {
+    type Duration = f64;
+    fn add(&self, duration: Self::Duration) -> Self {
+        Timestamp(self.0 + duration)
+    }
+}
+
 fn main() {
-    let ctx = Context::<Message, f64>::new();
+    let ctx = Context::<Message, Timestamp>::new();
     let mut s = Simulation::new(&ctx);
     let cpu = s.create_resource(1);
     let p1 = ctx.reserve_pid();
@@ -37,7 +47,7 @@ fn main() {
         }
     }));
     // let p1 to start immediately...
-    s.schedule_event(Event { time: 0.0, process: p1 });
+    s.schedule_event(Event { delay: 0.0, process: p1 });
     // ...and p2 after 17 time units
-    s.schedule_event(Event { time: 17.0, process: p2 });
+    s.schedule_event(Event { delay: 17.0, process: p2 });
 }

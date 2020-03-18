@@ -74,16 +74,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
-use std::ops::{Generator, GeneratorState, Add, AddAssign};
+use std::ops::{Generator, GeneratorState};
 use std::pin::Pin;
+
+pub trait Time {
+    type Duration;
+    fn add(&self, duration: Self::Duration) -> Self;
+}
 
 /// The effect is yelded by a process generator to
 /// interact with the simulation environment.
 //#[derive(Debug, Copy, Clone)]
-pub enum Effect<'a, M, T> {
+pub enum Effect<'a, M, T: Time> {
     /// The process that yields this effect will be resumed
-    /// after the speified time
-    TimeOut(T),
+    /// after the specified time
+    TimeOut(T::Duration),
     /// Yielding this effect it is possible to schedule the specified event
     Event(Event<T>),
     /// This effect is yielded to request a resource
@@ -95,7 +100,7 @@ pub enum Effect<'a, M, T> {
     /// Interrupt another process
     Interrupt(ProcessId),
     /// Send message to process (with latency), schedules delivering automatically
-    SendMessage(ProcessId, M, T),
+    SendMessage(ProcessId, M, T::Duration),
     /// Deliver message to process (now)
     DeliverMessage(ProcessId, M),
     /// Create and immediately schedule a new process
@@ -121,7 +126,7 @@ pub struct Context<M, T> {
     interrupted: RefCell<HashSet<ProcessId>>,
 }
 
-impl<M, T> Context<M, T> where T: Default + Copy + Add<Output=T> {
+impl<M, T> Context<M, T> where T: Default + Copy + Time {
     /// Create a new `Context` environment.
     pub fn new() -> Self {
         Context::default()
@@ -188,11 +193,11 @@ impl<M, T> Default for Context<M, T> where T: Default {
 ///
 /// See the crate-level documentation for more information about how the
 /// simulation framework works
-pub struct Simulation<'a, M, T> {
+pub struct Simulation<'a, M, T: Time> {
     context: &'a Context<M, T>,
     processes: Vec<Option<Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>>>,
-    future_events: BinaryHeap<Reverse<Event<T>>>,
-    processed_events: Vec<Event<T>>,
+    future_events: BinaryHeap<Reverse<ScheduledEvent<T>>>,
+    processed_events: Vec<ScheduledEvent<T>>,
     resources: Vec<Resource>,
 }
 
@@ -202,12 +207,21 @@ pub struct ParallelSimulation {
 }
  */
 
-/// An event that can be scheduled by a process, yelding the `Event` `Effect`
+/// Low-level struct (event already scheduled)
+#[derive(Debug, Copy, Clone)]
+pub struct ScheduledEvent<T> {
+    /// Absolute time when this event fires
+    pub time: T,
+    /// Process to execute when the event occur
+    pub process: ProcessId,
+}
+
+/// An event that can be scheduled by a process, yielding the `Event` `Effect`
 /// or by the owner of a `Simulation` through the `schedule` method
 #[derive(Debug, Copy, Clone)]
-pub struct Event<T> {
+pub struct Event<T: Time> {
     /// Time interval between the current simulation time and the event schedule
-    pub time: T,
+    pub delay: T::Duration,
     /// Process to execute when the event occur
     pub process: ProcessId,
 }
@@ -222,7 +236,7 @@ pub enum EndCondition<T> {
     NSteps(usize),
 }
 
-impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOrd + AddAssign + Add<Output=T> {
+impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + PartialOrd + Time {
     /// Create a new `Simulation` environment.
     pub fn new(ctx: &'a Context<M, T>) -> Simulation<'a, M, T> {
         Simulation {
@@ -238,7 +252,7 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
     pub fn context(&self) -> &'a Context<M, T> { self.context }
 
     /// Returns the log of processed events
-    pub fn processed_events(&self) -> &[Event<T>] {
+    pub fn processed_events(&self) -> &[ScheduledEvent<T>] {
         self.processed_events.as_slice()
     }
 
@@ -286,7 +300,8 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
     /// Schedule a process to be executed. Another way to schedule events is
     /// yielding `Effect::Event` from a process during the simulation.
     pub fn schedule_event(&mut self, event: Event<T>) {
-        self.future_events.push(Reverse(event));
+        let e = ScheduledEvent { time: T::default().add(event.delay), process: event.process };
+        self.future_events.push(Reverse(e));
     }
 
     /// Proceed in the simulation by 1 step
@@ -299,13 +314,13 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
                     Some(gg) => {
                         match Pin::new(gg).resume(()) {
                             GeneratorState::Yielded(y) => match y {
-                                Effect::TimeOut(t) => self.future_events.push(Reverse(Event {
-                                    time: self.context.time() + t,
+                                Effect::TimeOut(t) => self.future_events.push(Reverse(ScheduledEvent {
+                                    time: self.context.time().add(t),
                                     process: event.process,
                                 })),
-                                Effect::Event(mut e) => {
-                                    e.time += self.context.time();
-                                    self.future_events.push(Reverse(e))
+                                Effect::Event(e) => {
+                                    let ee = ScheduledEvent { time: self.context.time().add(e.delay), process: e.process };
+                                    self.future_events.push(Reverse(ee))
                                 }
                                 Effect::Request(r) => {
                                     let mut res = &mut self.resources[r];
@@ -314,7 +329,7 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
                                         res.queue.push_back(event.process);
                                     } else {
                                         // the process can use the resource immediately
-                                        self.future_events.push(Reverse(Event {
+                                        self.future_events.push(Reverse(ScheduledEvent {
                                             time: self.context.time(),
                                             process: event.process,
                                         }));
@@ -326,7 +341,7 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
                                     match res.queue.pop_front() {
                                         Some(p) =>
                                         // some processes in queue: schedule the next.
-                                            self.future_events.push(Reverse(Event {
+                                            self.future_events.push(Reverse(ScheduledEvent {
                                                 time: self.context.time(),
                                                 process: p,
                                             })),
@@ -337,29 +352,29 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
                                     }
                                     // after releasing the resource the process
                                     // can be resumed
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: event.process,
                                     }))
                                 }
                                 Effect::Interrupt(pid) => {
                                     self.context.interrupt(pid);
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: pid,
                                     }));
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: event.process,
                                     }))
                                 }
                                 Effect::DeliverMessage(pid, message) => {
                                     self.context.push_message(pid, message);
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: pid,
                                     }));
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: event.process,
                                     }))
@@ -369,22 +384,22 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
                                     self.create_process(xpid, Box::new(move || {
                                         yield Effect::DeliverMessage(pid, message);
                                     }));
-                                    self.future_events.push(Reverse(Event {
-                                        time: self.context.time() + delay,
+                                    self.future_events.push(Reverse(ScheduledEvent {
+                                        time: self.context.time().add(delay),
                                         process: xpid,
                                     }));
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: event.process,
                                     }))
                                 }
                                 Effect::ScheduleProcess(pid, generator) => {
                                     self.create_process(pid, generator);
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: event.process,
                                     }));
-                                    self.future_events.push(Reverse(Event {
+                                    self.future_events.push(Reverse(ScheduledEvent {
                                         time: self.context.time(),
                                         process: pid,
                                     }))
@@ -444,22 +459,22 @@ impl<'a, M: 'static, T> Simulation<'a, M, T> where T: Default + Copy + PartialOr
     }
 }
 
-impl<T: PartialEq> PartialEq for Event<T> {
-    fn eq(&self, other: &Event<T>) -> bool {
+impl<T: PartialEq> PartialEq for ScheduledEvent<T> {
+    fn eq(&self, other: &ScheduledEvent<T>) -> bool {
         self.time == other.time
     }
 }
 
-impl<T: PartialEq> Eq for Event<T> {}
+impl<T: PartialEq> Eq for ScheduledEvent<T> {}
 
-impl<T: PartialOrd> PartialOrd for Event<T> {
-    fn partial_cmp(&self, other: &Event<T>) -> Option<Ordering> {
+impl<T: PartialOrd> PartialOrd for ScheduledEvent<T> {
+    fn partial_cmp(&self, other: &ScheduledEvent<T>) -> Option<Ordering> {
         self.time.partial_cmp(&other.time)
     }
 }
 
-impl<T: PartialOrd> Ord for Event<T> {
-    fn cmp(&self, other: &Event<T>) -> Ordering {
+impl<T: PartialOrd> Ord for ScheduledEvent<T> {
+    fn cmp(&self, other: &ScheduledEvent<T>) -> Ordering {
         match self.time.partial_cmp(&other.time) {
             Some(o) => o,
             None => panic!("Event time was uncomparable. Maybe a NaN"),
@@ -469,18 +484,42 @@ impl<T: PartialOrd> Ord for Event<T> {
 
 #[cfg(test)]
 mod tests {
-    use Context;
+    use ::{Context, Time};
+    use Event;
+    use std::fmt;
 
     #[derive(Debug, Copy, Clone, PartialEq)]
     enum TestMessage {
         MessageType1(&'static str),
     }
 
+    impl Time for f64 {
+        type Duration = f64;
+        fn add(&self, duration: Self::Duration) -> Self {
+            *self + duration
+        }
+    }
+
+    #[derive(Clone, Copy, Default, PartialEq, PartialOrd, Debug)]
+    struct TimestampU64(u64);
+
+    impl Time for TimestampU64 {
+        type Duration = u64;
+        fn add(&self, duration: Self::Duration) -> Self {
+            Self(self.0 + duration)
+        }
+    }
+
+    impl fmt::Display for TimestampU64 {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
     #[test]
     fn it_works() {
         use Simulation;
         use Effect;
-        use Event;
 
         let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
@@ -495,7 +534,7 @@ mod tests {
                 yield Effect::TimeOut(a);
             }
         }));
-        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
         s.step();
         s.step();
         assert_eq!(ctx.time(), 1.0);
@@ -509,9 +548,8 @@ mod tests {
     fn it_works_u64() {
         use Simulation;
         use Effect;
-        use Event;
 
-        let ctx = Context::<TestMessage, u64>::new();
+        let ctx = Context::<TestMessage, TimestampU64>::new();
         let mut s = Simulation::new(&ctx);
         let ctxref = s.context();
         let p1 = ctx.reserve_pid();
@@ -524,21 +562,20 @@ mod tests {
                 yield Effect::TimeOut(a);
             }
         }));
-        s.schedule_event(Event { time: 0, process: p1 });
+        s.schedule_event(Event { delay: 0, process: p1 });
         s.step();
         s.step();
-        assert_eq!(ctx.time(), 1000);
+        assert_eq!(ctx.time(), TimestampU64(1000));
         s.step();
-        assert_eq!(ctx.time(), 3000);
+        assert_eq!(ctx.time(), TimestampU64(3000));
         s.step();
-        assert_eq!(ctx.time(), 6000);
+        assert_eq!(ctx.time(), TimestampU64(6000));
     }
 
     #[test]
     fn run() {
         use Simulation;
         use Effect;
-        use Event;
         use EndCondition;
 
         let ctx = Context::<TestMessage, f64>::new();
@@ -551,7 +588,7 @@ mod tests {
                 yield Effect::TimeOut(tik);
             }
         }));
-        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
         let _s = s.run(EndCondition::Time(10.0));
         println!("{}", ctx.time());
         assert!(ctx.time() >= 10.0);
@@ -561,7 +598,6 @@ mod tests {
     fn resource() {
         use Simulation;
         use Effect;
-        use Event;
         use EndCondition::NoEvents;
 
         let ctx = Context::<TestMessage, f64>::new();
@@ -584,9 +620,9 @@ mod tests {
         }));
 
         // let p1 start immediately...
-        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
         // let p2 start after 2 t.u., when r is not available
-        s.schedule_event(Event { time: 2.0, process: p2 });
+        s.schedule_event(Event { delay: 2.0, process: p2 });
         // p2 will wait r to be free (time 7.0) and its timeout
         // of 3.0 t.u. The simulation will end at time 10.0
 
@@ -599,7 +635,6 @@ mod tests {
     fn interruption() {
         use Simulation;
         use Effect;
-        use Event;
 
         let ctx = Context::<TestMessage, f64>::new();
         let mut s = Simulation::new(&ctx);
@@ -624,8 +659,8 @@ mod tests {
             yield Effect::Interrupt(p1);
         }));
 
-        s.schedule_event(Event { time: 0.0, process: p1 });
-        s.schedule_event(Event { time: 0.0, process: p2 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p2 });
         s.step();
         s.step();
         s.step();
@@ -640,7 +675,6 @@ mod tests {
     fn messaging() {
         use Simulation;
         use Effect;
-        use Event;
 
         let ctx = Context::<TestMessage, f64>::new();
         let ctxref = &ctx;
@@ -681,8 +715,8 @@ mod tests {
             println!("{}: ending process #2", ctxref.time());
         }));
 
-        s.schedule_event(Event { time: 0.0, process: p1 });
-        s.schedule_event(Event { time: 0.0, process: p2 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p2 });
         s.step();
         s.step();
         s.step();
@@ -698,7 +732,6 @@ mod tests {
     fn schedule_process() {
         use Simulation;
         use Effect;
-        use Event;
 
         let ctx = Context::<TestMessage, f64>::new();
         let ctxref = &ctx;
@@ -724,7 +757,7 @@ mod tests {
         }));
 
 
-        s.schedule_event(Event { time: 0.0, process: p1 });
+        s.schedule_event(Event { delay: 0.0, process: p1 });
         s.step();
         s.step();
         s.step();
