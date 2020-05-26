@@ -71,11 +71,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>. */
 
 #![feature(generators, generator_trait)]
 
+extern crate fnv;
+
 use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::ops::{Generator, GeneratorState};
 use std::pin::Pin;
+use fnv::FnvHashMap;
 
 pub trait Time: PartialOrd + PartialEq {
     type Duration;
@@ -108,7 +111,7 @@ pub enum Effect<'a, M, T: Time> {
 }
 
 /// Identifies a process. Can be used to resume it from another one and to schedule it.
-pub type ProcessId = usize;
+pub type ProcessId = u64;
 /// Identifies a resource. Can be used to request and release it.
 pub type ResourceId = usize;
 
@@ -195,10 +198,10 @@ impl<M, T> Default for Context<M, T> where T: Default {
 /// simulation framework works
 pub struct Simulation<'a, M, T: Time> {
     context: &'a Context<M, T>,
-    processes: Vec<Option<Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>>>,
+    processes: FnvHashMap<ProcessId, Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>>,
     future_events: BinaryHeap<Reverse<ScheduledEvent<T>>>,
-    processed_events: Vec<ScheduledEvent<T>>,
     resources: Vec<Resource>,
+    processed_events_cnt: u64,
 }
 
 /*
@@ -233,7 +236,7 @@ pub enum EndCondition<T> {
     /// Run the simulation until there are no more events scheduled.
     NoEvents,
     /// Execute exactly N steps of the simulation.
-    NSteps(usize),
+    NSteps(u64),
 }
 
 impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
@@ -241,20 +244,15 @@ impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
     pub fn new(ctx: &'a Context<M, T>) -> Simulation<'a, M, T> {
         Simulation {
             context: ctx,
-            processes: Vec::default(),
+            processes: FnvHashMap::default(),
             future_events: BinaryHeap::default(),
-            processed_events: Vec::default(),
             resources: Vec::default(),
+            processed_events_cnt: 0,
         }
     }
 
     /// Returns reference to the context
     pub fn context(&self) -> &'a Context<M, T> { self.context }
-
-    /// Returns the log of processed events
-    pub fn processed_events(&self) -> &[ScheduledEvent<T>] {
-        self.processed_events.as_slice()
-    }
 
     /// Create a process. Requires valid PID.
     ///
@@ -265,21 +263,12 @@ impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
         pid: ProcessId,
         process: Box<dyn Generator<Yield=Effect<'a, M, T>, Return=()> + Unpin + 'a>,
     ) {
-        let next_pid = self.context.next_pid.get();
 
-        if pid >= next_pid {
-            panic!("ERROR: invalid PID {}", pid);
-        }
-
-        for _i in self.processes.len()..next_pid {
-            self.processes.push(None);
-        }
-
-        if self.processes[pid].is_some() {
+        if self.processes.get(&pid).is_some() {
             panic!("ERROR: process already exists for PID {}", pid);
         }
 
-        self.processes[pid] = Some(process);
+        self.processes.insert(pid, process);
     }
 
     /// Create a new finite resource, of which n instancies are available.
@@ -310,7 +299,7 @@ impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
             Some(Reverse(event)) => {
                 self.context.time.set(event.time);
 
-                match self.processes[event.process].as_mut() {
+                match self.processes.get_mut(&event.process) {
                     Some(gg) => {
                         match Pin::new(gg).resume(()) {
                             GeneratorState::Yielded(y) => match y {
@@ -407,15 +396,10 @@ impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
                                 Effect::Wait => {}
                             },
                             GeneratorState::Complete(_) => {
-                                // FIXME: removing the process from the vector would invalidate
-                                // all existing `ProcessId`s, but keeping it would be a
-                                // waste of space since it is completed.
-                                // May be worth to use another data structure.
-                                // At least let's remove the generator itself.
-                                self.processes[event.process].take();
+                                self.processes.remove(&event.process);
                             }
                         }
-                        self.processed_events.push(event);
+                        self.processed_events_cnt += 1;
                     }
                     None => {
                         // the process is already completed, we won't attempt to resume it
@@ -450,8 +434,7 @@ impl<'a, M: 'static, T,> Simulation<'a, M, T> where T: Default + Copy + Time {
             EndCondition::NoEvents => if self.future_events.len() == 0 {
                 return true;
             },
-            // FIXME: what if client call `run(EndCondition::NSteps(n)` after having called `step()` for some times?
-            EndCondition::NSteps(n) => if self.processed_events.len() == *n {
+            EndCondition::NSteps(n) => if self.processed_events_cnt >= *n {
                 return true;
             },
         }
@@ -626,8 +609,7 @@ mod tests {
         // p2 will wait r to be free (time 7.0) and its timeout
         // of 3.0 t.u. The simulation will end at time 10.0
 
-        let s = s.run(NoEvents);
-        println!("{:?}", s.processed_events());
+        let _s = s.run(NoEvents);
         assert_eq!(ctx.time(), 10.0);
     }
 
